@@ -35,7 +35,7 @@ python /opt/content/ComfyUI-Manager/cm-cli.py \
 O EFS é compartilhado entre réplicas. Após instalar, o DevOps deve fazer
 rolling restart para carregar o novo pack em todos os containers:
 
-**Conta prod (`828435023027`), profile `trajano-homolog` → ajustar para prod:**
+**O pool do ComfyUI vive na conta PROD (`912668123297`, profile default do DevOps); o serviço `svc-confyui-prd-sqs` é o que atende `comfyui-hml` via `tg-comfyui-hml`. A conta homolog (`828435023027`) é só do Laravel:**
 ```bash
 aws ecs update-service \
     --cluster cluster-confyui-prd \
@@ -50,9 +50,10 @@ Aguardar o deploy estabilizar (`aws ecs wait services-stable ...`) antes de veri
 
 ```bash
 # 1. Confirmar que o pack aparece como instalado
-curl -s http://<COMFYUI_HOST>/v2/customnode/installed?mode=default \
+# resposta é um dicionário { "<pasta do pack>": {ver, cnr_id, aux_id, enabled} }
+curl -s -u "$COMFY_USER:$COMFY_PASS" "https://<COMFYUI_HOST>/v2/customnode/installed?mode=default" \
     | python3 -c "import sys,json; d=json.load(sys.stdin); \
-      print([n for n in d.get('Nodes',[]) if 'aw-comfyui-nodes' in n.get('id','')])"
+      print(d.get('aw-comfyui-nodes') or 'NAO ENCONTRADO')"
 
 # 2. Confirmar que o node está registrado no schema
 curl -s http://<COMFYUI_HOST>/object_info/GeminiImageInteractionsNode \
