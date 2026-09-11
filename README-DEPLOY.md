@@ -1,10 +1,9 @@
 # Deploy no ComfyUI (ECS/EFS) — v0.2.0
 
-> **A tag `v0.2.0` so existe depois do merge desta entrega.** Enquanto a PR estiver
-> aberta, `git checkout v0.2.0` falha com `pathspec did not match`. O passo de tag faz
-> parte do release (ver "Release: criar a tag" no fim deste documento) e o deploy no
-> ECS so deve acontecer depois dele. Para testar antes do merge, use a branch:
-> `git checkout feat/aw-gpt-image-2.5-and-kling-video`.
+> **Confira que a tag existe antes de mandar alguem seguir este runbook:**
+> `git ls-remote --tags origin`. Tag ausente faz o clone falhar com
+> `Remote branch v0.X.Y not found`, e o sintoma nao diz que o problema e a tag.
+> A v0.2.0 foi publicada em 11/09/2026 — mergeada na main sem tag, que so subiu depois.
 
 Pack: `aw-comfyui-nodes` — tres nodes disponíveis a partir desta versao.
 
@@ -38,8 +37,9 @@ O ComfyUI carrega no boot qualquer pasta de `custom_nodes` que tenha `__init__.p
 
 ```bash
 cd /opt/content/custom_nodes
-git clone https://github.com/TrolljanO/aw-comfyui-nodes
-cd aw-comfyui-nodes && git checkout v0.2.0
+# -b <tag> ja clona na tag certa — dispensa o checkout depois
+git clone https://github.com/TrolljanO/aw-comfyui-nodes -b v0.2.0
+cd aw-comfyui-nodes
 
 # dependencias (requests e python-dotenv normalmente ja existem no ComfyUI)
 python -m pip install -r requirements.txt
@@ -162,7 +162,7 @@ GeminiImageInteractionsNode; v0.2.0 estende o fix para os tres nodes.
 
 ```bash
 cd /opt/content/custom_nodes/aw-comfyui-nodes
-git fetch --tags && git checkout v0.2.0
+git fetch --tags && git checkout v0.2.0   # pasta ja clonada: aqui o checkout e necessario
 python -m pip install -r requirements.txt
 # + rolling restart
 ```
@@ -193,7 +193,9 @@ ou modelos lentos, aumentar o valor no workflow.
 
 ## Release: criar a tag
 
-O runbook acima assume a tag publicada. Depois do merge na `main`:
+O runbook acima assume a tag publicada — e o merge **nao** cria a tag. Isso ja mordeu
+uma vez: a v0.2.0 entrou na main e o deploy continuou puxando v0.1.1, sem os nodes novos.
+Para toda release, depois do merge na `main`:
 
 ```bash
 git checkout main && git pull
@@ -201,6 +203,5 @@ git tag -a v0.2.0 -m 'AwGptImageNode (model livre) + AwKlingVideoNode'
 git push origin v0.2.0
 ```
 
-Sem essa etapa o documento acima aponta para uma referencia inexistente — foi
-exatamente esse o estado em que este README nasceu, e vale conferir antes de mandar
-alguem seguir o runbook.
+Sem essa etapa o runbook aponta para uma referencia inexistente e o host continua
+rodando a versao anterior — silenciosamente, porque o clone de uma tag velha funciona.
