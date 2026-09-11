@@ -1,5 +1,11 @@
 # Deploy no ComfyUI (ECS/EFS) — v0.2.0
 
+> **A tag `v0.2.0` so existe depois do merge desta entrega.** Enquanto a PR estiver
+> aberta, `git checkout v0.2.0` falha com `pathspec did not match`. O passo de tag faz
+> parte do release (ver "Release: criar a tag" no fim deste documento) e o deploy no
+> ECS so deve acontecer depois dele. Para testar antes do merge, use a branch:
+> `git checkout feat/aw-gpt-image-2.5-and-kling-video`.
+
 Pack: `aw-comfyui-nodes` — tres nodes disponíveis a partir desta versao.
 
 | Node | Classe | Endpoint/API |
@@ -183,3 +189,18 @@ defasado (NTP desativado), o `nbf` (not-before = now-5s) pode ser rejeitado.
 
 O node aguarda ate `timeout_seconds` (padrao 600s) pelo video. Para videos longos
 ou modelos lentos, aumentar o valor no workflow.
+
+
+## Release: criar a tag
+
+O runbook acima assume a tag publicada. Depois do merge na `main`:
+
+```bash
+git checkout main && git pull
+git tag -a v0.2.0 -m 'AwGptImageNode (model livre) + AwKlingVideoNode'
+git push origin v0.2.0
+```
+
+Sem essa etapa o documento acima aponta para uma referencia inexistente — foi
+exatamente esse o estado em que este README nasceu, e vale conferir antes de mandar
+alguem seguir o runbook.
