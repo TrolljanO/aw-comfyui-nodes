@@ -20,6 +20,7 @@ import hmac
 import io
 import json
 import os
+import re
 import time
 
 # requests and ComfyUI libs (folder_paths, torch, numpy, PIL) are imported
@@ -44,19 +45,41 @@ _POLL_INTERVAL_SECONDS = 10  # seconds between status-poll requests
 # ---------------------------------------------------------------------------
 
 
-def _resolve_credential(raw_value: str) -> str:
+_ENV_NAME_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
+
+
+def _resolve_credential(raw_value: str, field: str) -> str:
     """
-    Resolve a credential input following the pack convention:
-    - If the value looks like an environment-variable name (all-uppercase,
-      no spaces, no special chars typical of actual key material), try
-      os.environ first; return the env value if found.
-    - Otherwise return the literal string as-is (user pasted the key).
+    Resolve a credential input following the pack convention: the input carries
+    either the NAME of an environment variable or the literal key material.
+
+    Falha ALTO quando o valor tem forma de nome de env var e a env nao existe.
+    O fallback silencioso anterior devolvia a propria string ("KLING_SECRET_KEY")
+    como se fosse o segredo, assinava o JWT com ela, e o Kling respondia
+    401 code=1002 — um erro que aponta para a conta, nao para a configuracao.
+    Meia hora de investigacao na direcao errada; ver o relato em 11/09/2026.
     """
     stripped = raw_value.strip()
-    if stripped and stripped == stripped.upper() and " " not in stripped:
+
+    if not stripped:
+        raise RuntimeError(
+            f"AwKlingVideoNode: o input '{field}' esta vazio. Informe o NOME de uma "
+            f"variavel de ambiente (ex.: KLING_ACCESS_KEY) ou cole a credencial."
+        )
+
+    if _ENV_NAME_RE.match(stripped):
         env_val = os.environ.get(stripped, "")
-        if env_val:
-            return env_val
+        if not env_val:
+            raise RuntimeError(
+                f"AwKlingVideoNode: o input '{field}' vale '{stripped}', que tem forma de "
+                f"nome de variavel de ambiente, mas essa variavel NAO esta definida no "
+                f"processo do ComfyUI. O node nao vai assinar o token com esse texto. "
+                f"Defina a env no container, ou ligue este input a um node de secret, "
+                f"ou cole a credencial literal. Lembre que o Kling exige o PAR "
+                f"access_key + secret_key — uma chave sozinha nao autentica."
+            )
+        return env_val
+
     return stripped
 
 
@@ -434,8 +457,8 @@ class AwKlingVideoNode:
         image_tail=None,
     ):
         # ---- resolve credentials -------------------------------------------
-        resolved_access = _resolve_credential(access_key)
-        resolved_secret = _resolve_credential(secret_key)
+        resolved_access = _resolve_credential(access_key, "access_key")
+        resolved_secret = _resolve_credential(secret_key, "secret_key")
 
         if not resolved_access:
             raise RuntimeError(

@@ -198,8 +198,8 @@ class TestAwKlingVideoNodeGenerate(unittest.TestCase):
 
             result = node.generate(
                 prompt="A photorealistic walkthrough",
-                access_key="KLING_ACC_LITERAL",   # lowercase nao existe no env -> literal
-                secret_key="KLING_SEC_LITERAL",
+                access_key="ak-literal-AbC123",   # nao tem forma de env var -> literal
+                secret_key="sk-literal-XyZ789",
                 model_name="kling-v3",
                 negative_prompt="",
                 duration="5",
@@ -254,7 +254,7 @@ class TestAwKlingVideoNodeGenerate(unittest.TestCase):
         with self.assertRaises(RuntimeError) as ctx:
             node.generate(
                 prompt="test",
-                access_key="ACC_KEY",
+                access_key="ak-literal-AbC123",
                 secret_key="",
                 model_name="kling-v3",
                 negative_prompt="",
@@ -280,8 +280,8 @@ class TestAwKlingVideoNodeGenerate(unittest.TestCase):
             with self.assertRaises(RuntimeError) as ctx:
                 node.generate(
                     prompt="test",
-                    access_key="ACC_KEY",
-                    secret_key="SEC_KEY",
+                    access_key="ak-literal-AbC123",
+                    secret_key="sk-literal-XyZ789",
                     model_name="kling-v3",
                     negative_prompt="",
                     duration="5",
@@ -380,3 +380,35 @@ if __name__ == "__main__":
     for suite in suites:
         result = runner.run(suite)
     sys.exit(0 if result.wasSuccessful() else 1)
+
+
+class TestCredentialFailLoud(unittest.TestCase):
+    """
+    O fallback silencioso assinava o JWT com a propria string "KLING_SECRET_KEY" e o
+    Kling devolvia 401 code=1002 "access key not found" — um erro que aponta para a
+    conta, nao para a env faltando. Aconteceu de verdade em 11/09/2026.
+    """
+
+    def test_env_name_shape_without_env_raises_naming_the_field_and_var(self):
+        with patch.dict(os.environ, {}, clear=True):
+            with self.assertRaises(RuntimeError) as ctx:
+                _mod._resolve_credential("KLING_SECRET_KEY", "secret_key")
+        msg = str(ctx.exception)
+        self.assertIn("secret_key", msg)
+        self.assertIn("KLING_SECRET_KEY", msg)
+
+    def test_env_name_shape_with_env_set_returns_env_value(self):
+        with patch.dict(os.environ, {"KLING_SECRET_KEY": "sk-real-value"}, clear=True):
+            self.assertEqual(
+                _mod._resolve_credential("KLING_SECRET_KEY", "secret_key"), "sk-real-value"
+            )
+
+    def test_literal_credential_passes_through_untouched(self):
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(
+                _mod._resolve_credential("AbC123-real-key", "access_key"), "AbC123-real-key"
+            )
+
+    def test_empty_input_raises(self):
+        with self.assertRaises(RuntimeError):
+            _mod._resolve_credential("   ", "access_key")
