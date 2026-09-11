@@ -1,7 +1,7 @@
 [project]
 name = "aw-comfyui-nodes"
-version = "0.1.1"
-description = "a|w ComfyUI custom nodes — Gemini Image Interactions API"
+version = "0.2.0"
+description = "a|w ComfyUI custom nodes — Gemini, GPT-Image, Kling Video"
 readme = "README.md"
 license = { text = "Proprietary" }
 requires-python = ">=3.10"
