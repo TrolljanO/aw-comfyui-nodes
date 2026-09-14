@@ -144,10 +144,7 @@ class TestKlingPost(unittest.TestCase):
         mock_post.return_value = mock_resp
 
         with self.assertRaises(RuntimeError) as ctx:
-            _kling_post(
-                "https://api-singapore.klingai.com/v1/videos/text2video",
-                "access_key",
-                "secret_key",
+            _kling_post("https://api-singapore.klingai.com/v1/videos/text2video", "tok-fake",
                 {"model_name": "kling-v3", "prompt": "test"},
             )
 
@@ -166,9 +163,7 @@ class TestKlingPost(unittest.TestCase):
         mock_post.return_value = mock_resp
 
         with self.assertRaises(RuntimeError) as ctx:
-            _kling_post(
-                "https://api-singapore.klingai.com/v1/videos/text2video",
-                "a", "b", {},
+            _kling_post("https://api-singapore.klingai.com/v1/videos/text2video", "tok-fake", {},
             )
 
         self.assertIn("401", str(ctx.exception))
@@ -198,6 +193,7 @@ class TestAwKlingVideoNodeGenerate(unittest.TestCase):
 
             result = node.generate(
                 prompt="A photorealistic walkthrough",
+                api_key="",
                 access_key="ak-literal-AbC123",   # nao tem forma de env var -> literal
                 secret_key="sk-literal-XyZ789",
                 model_name="kling-v3",
@@ -233,6 +229,7 @@ class TestAwKlingVideoNodeGenerate(unittest.TestCase):
         with self.assertRaises(RuntimeError) as ctx:
             node.generate(
                 prompt="test",
+                api_key="",
                 access_key="",
                 secret_key="some_secret",
                 model_name="kling-v3",
@@ -254,6 +251,7 @@ class TestAwKlingVideoNodeGenerate(unittest.TestCase):
         with self.assertRaises(RuntimeError) as ctx:
             node.generate(
                 prompt="test",
+                api_key="",
                 access_key="ak-literal-AbC123",
                 secret_key="",
                 model_name="kling-v3",
@@ -280,6 +278,7 @@ class TestAwKlingVideoNodeGenerate(unittest.TestCase):
             with self.assertRaises(RuntimeError) as ctx:
                 node.generate(
                     prompt="test",
+                    api_key="",
                     access_key="ak-literal-AbC123",
                     secret_key="sk-literal-XyZ789",
                     model_name="kling-v3",
@@ -412,3 +411,81 @@ class TestCredentialFailLoud(unittest.TestCase):
     def test_empty_input_raises(self):
         with self.assertRaises(RuntimeError):
             _mod._resolve_credential("   ", "access_key")
+
+
+class TestApiKeyBearerMode(unittest.TestCase):
+    """
+    O Kling do console entrega UMA credencial para muita gente, e a skill oficial suporta
+    isso via KLING_TOKEN (bearer pronto, sem assinar JWT). O node precisa do mesmo caminho,
+    senao quem tem uma chave so fica sem opcao — nenhum custom node de ComfyUI cobre isso.
+    """
+
+    def _kwargs(self, **over):
+        base = dict(
+            prompt="test",
+            api_key="",
+            access_key="ak-literal-AbC123",
+            secret_key="sk-literal-XyZ789",
+            model_name="kling-v3",
+            negative_prompt="",
+            duration="5",
+            mode="std",
+            aspect_ratio="16:9",
+            sound="off",
+            filename_prefix="aw_kling",
+            timeout_seconds=60,
+            seed=0,
+        )
+        base.update(over)
+        return base
+
+    def test_api_key_e_usado_direto_sem_assinar_jwt(self):
+        node = AwKlingVideoNode()
+        with patch.object(_mod, "_gen_jwt") as gen, \
+             patch.object(_mod, "_kling_post", return_value={"code": 0, "data": {"task_id": "t1"}}) as post_mock, \
+             patch.object(_mod, "_poll_until_done", return_value="http://x/v.mp4"), \
+             patch.object(_mod, "_download_mp4", return_value=b"mp4"), \
+             patch.object(_mod, "_save_mp4", return_value=("v.mp4", "")):
+            node.generate(**self._kwargs(api_key="tok-bearer-pronto"))
+
+        gen.assert_not_called()
+        # o token que foi parar no POST e o proprio api_key
+        self.assertEqual(post_mock.call_args[0][1], "tok-bearer-pronto")
+
+    def test_sem_api_key_assina_jwt_com_ak_sk(self):
+        node = AwKlingVideoNode()
+        with patch.object(_mod, "_gen_jwt", return_value="jwt-assinado") as gen, \
+             patch.object(_mod, "_kling_post", return_value={"code": 0, "data": {"task_id": "t1"}}) as post_mock, \
+             patch.object(_mod, "_poll_until_done", return_value="http://x/v.mp4"), \
+             patch.object(_mod, "_download_mp4", return_value=b"mp4"), \
+             patch.object(_mod, "_save_mp4", return_value=("v.mp4", "")):
+            node.generate(**self._kwargs())
+
+        gen.assert_called_once_with("ak-literal-AbC123", "sk-literal-XyZ789")
+        self.assertEqual(post_mock.call_args[0][1], "jwt-assinado")
+
+    def test_api_key_pode_ser_nome_de_env_var(self):
+        node = AwKlingVideoNode()
+        with patch.dict(os.environ, {"KLING_API_KEY": "tok-da-env"}, clear=False), \
+             patch.object(_mod, "_gen_jwt") as gen, \
+             patch.object(_mod, "_kling_post", return_value={"code": 0, "data": {"task_id": "t1"}}) as post_mock, \
+             patch.object(_mod, "_poll_until_done", return_value="http://x/v.mp4"), \
+             patch.object(_mod, "_download_mp4", return_value=b"mp4"), \
+             patch.object(_mod, "_save_mp4", return_value=("v.mp4", "")):
+            node.generate(**self._kwargs(api_key="KLING_API_KEY"))
+
+        gen.assert_not_called()
+        self.assertEqual(post_mock.call_args[0][1], "tok-da-env")
+
+    def test_api_key_com_env_ausente_cai_para_ak_sk_em_vez_de_estourar(self):
+        """api_key e opcional: env nao definida nao pode matar o caminho AK/SK."""
+        node = AwKlingVideoNode()
+        with patch.dict(os.environ, {}, clear=True), \
+             patch.object(_mod, "_gen_jwt", return_value="jwt-assinado"), \
+             patch.object(_mod, "_kling_post", return_value={"code": 0, "data": {"task_id": "t1"}}) as post_mock, \
+             patch.object(_mod, "_poll_until_done", return_value="http://x/v.mp4"), \
+             patch.object(_mod, "_download_mp4", return_value=b"mp4"), \
+             patch.object(_mod, "_save_mp4", return_value=("v.mp4", "")):
+            node.generate(**self._kwargs(api_key="KLING_API_KEY_INEXISTENTE"))
+
+        self.assertEqual(post_mock.call_args[0][1], "jwt-assinado")

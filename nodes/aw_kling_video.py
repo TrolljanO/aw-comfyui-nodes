@@ -48,7 +48,7 @@ _POLL_INTERVAL_SECONDS = 10  # seconds between status-poll requests
 _ENV_NAME_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
 
 
-def _resolve_credential(raw_value: str, field: str) -> str:
+def _resolve_credential(raw_value: str, field: str, required: bool = True) -> str:
     """
     Resolve a credential input following the pack convention: the input carries
     either the NAME of an environment variable or the literal key material.
@@ -62,6 +62,8 @@ def _resolve_credential(raw_value: str, field: str) -> str:
     stripped = raw_value.strip()
 
     if not stripped:
+        if not required:
+            return ""
         raise RuntimeError(
             f"AwKlingVideoNode: o input '{field}' esta vazio. Informe o NOME de uma "
             f"variavel de ambiente (ex.: KLING_ACCESS_KEY) ou cole a credencial."
@@ -70,6 +72,8 @@ def _resolve_credential(raw_value: str, field: str) -> str:
     if _ENV_NAME_RE.match(stripped):
         env_val = os.environ.get(stripped, "")
         if not env_val:
+            if not required:
+                return ""
             raise RuntimeError(
                 f"AwKlingVideoNode: o input '{field}' vale '{stripped}', que tem forma de "
                 f"nome de variavel de ambiente, mas essa variavel NAO esta definida no "
@@ -136,18 +140,17 @@ def _tensor_to_png_b64(tensor) -> str:
     return base64.b64encode(buf.getvalue()).decode("utf-8")
 
 
-def _kling_post(url: str, access_key: str, secret_key: str, body: dict) -> dict:
+def _kling_post(url: str, token: str, body: dict) -> dict:
     """
-    POST to the Kling API with a freshly-minted JWT.
+    POST to the Kling API with a ready Bearer token (JWT assinado, ou API key direta).
     Raises RuntimeError on:
       - non-200 HTTP status
       - response body where code != 0 (Kling returns errors via code even on HTTP 200)
     """
     import requests as req  # noqa: PLC0415
 
-    jwt = _gen_jwt(access_key, secret_key)
     headers = {
-        "Authorization": f"Bearer {jwt}",
+        "Authorization": f"Bearer {token}",
         "Content-Type": "application/json",
     }
     resp = req.post(url, headers=headers, json=body, timeout=60)
@@ -168,15 +171,14 @@ def _kling_post(url: str, access_key: str, secret_key: str, body: dict) -> dict:
     return data
 
 
-def _kling_get(url: str, access_key: str, secret_key: str) -> dict:
+def _kling_get(url: str, token: str) -> dict:
     """
-    GET from the Kling API with a freshly-minted JWT.
+    GET from the Kling API with a ready Bearer token.
     Raises RuntimeError on HTTP error or API-level error (code != 0).
     """
     import requests as req  # noqa: PLC0415
 
-    jwt = _gen_jwt(access_key, secret_key)
-    headers = {"Authorization": f"Bearer {jwt}"}
+    headers = {"Authorization": f"Bearer {token}"}
     resp = req.get(url, headers=headers, timeout=60)
     if resp.status_code != 200:
         snippet = resp.text[:400]
@@ -219,7 +221,7 @@ def _poll_until_done(
                 f"{timeout_seconds}) if the model needs more time."
             )
 
-        resp_data = _kling_get(poll_url, access_key, secret_key)
+        resp_data = _kling_get(poll_url, token)
         task_data = resp_data.get("data", {})
         status = task_data.get("task_status", "")
 
@@ -339,6 +341,19 @@ class AwKlingVideoNode:
                         "default": "A photorealistic architectural walkthrough",
                     },
                 ),
+                # Token Bearer PRONTO. Tem prioridade sobre access_key/secret_key, espelhando
+                # a prioridade da skill oficial (KLING_TOKEN > AK/SK -> JWT). Serve para quem
+                # so tem UMA credencial: cola aqui e o node nao assina JWT nenhum.
+                "api_key": (
+                    "STRING",
+                    {
+                        "default": "KLING_API_KEY",
+                        "tooltip": (
+                            "Token Bearer pronto (ou o NOME de uma env var que o contenha). "
+                            "Se preenchido, access_key/secret_key sao ignorados."
+                        ),
+                    },
+                ),
                 "access_key": (
                     "STRING",
                     {
@@ -442,6 +457,7 @@ class AwKlingVideoNode:
     def generate(
         self,
         prompt: str,
+        api_key: str,
         access_key: str,
         secret_key: str,
         model_name: str,
@@ -457,20 +473,29 @@ class AwKlingVideoNode:
         image_tail=None,
     ):
         # ---- resolve credentials -------------------------------------------
-        resolved_access = _resolve_credential(access_key, "access_key")
-        resolved_secret = _resolve_credential(secret_key, "secret_key")
+        # Prioridade de credencial, igual a da skill oficial do Kling:
+        #   1) api_key  -> usado DIRETO como Bearer, sem assinar nada
+        #   2) AK + SK  -> JWT HS256 por request
+        # O Bearer do header e o par AK/SK nao sao caminhos rivais: o JWT assinado com
+        # AK/SK E o que vai no Bearer. Quem so tem uma credencial usa o caminho 1.
+        raw_api_key = (api_key or "").strip()
+        token = ""
 
-        if not resolved_access:
-            raise RuntimeError(
-                "AwKlingVideoNode: access_key resolved to an empty string. "
-                "Set KLING_ACCESS_KEY in the ComfyUI .env or paste the key directly."
-            )
-        if not resolved_secret:
-            raise RuntimeError(
-                "AwKlingVideoNode: secret_key resolved to an empty string. "
-                "Set KLING_SECRET_KEY in the ComfyUI .env or paste the key directly."
-            )
+        if raw_api_key:
+            resolved = _resolve_credential(raw_api_key, "api_key", required=False)
+            if resolved:
+                token = resolved
 
+        if not token:
+            resolved_access = _resolve_credential(access_key, "access_key")
+            resolved_secret = _resolve_credential(secret_key, "secret_key")
+            token = _gen_jwt(resolved_access, resolved_secret)
+
+        if not token:
+            raise RuntimeError(
+                "AwKlingVideoNode: nenhuma credencial utilizavel. Preencha api_key com um "
+                "token Bearer pronto, OU access_key + secret_key para o node assinar o JWT."
+            )
         base = _api_base()
 
         # ---- build request body and choose endpoint -----------------------
@@ -508,7 +533,7 @@ class AwKlingVideoNode:
             }
 
         # ---- submit task ---------------------------------------------------
-        submit_resp = _kling_post(endpoint, resolved_access, resolved_secret, body)
+        submit_resp = _kling_post(endpoint, token, body)
         try:
             task_id = submit_resp["data"]["task_id"]
         except (KeyError, TypeError) as exc:
@@ -519,9 +544,7 @@ class AwKlingVideoNode:
             ) from exc
 
         # ---- poll until video is ready ------------------------------------
-        video_url = _poll_until_done(
-            route, task_id, resolved_access, resolved_secret, timeout_seconds
-        )
+        video_url = _poll_until_done(route, task_id, token, timeout_seconds)
 
         # ---- download mp4 -------------------------------------------------
         mp4_bytes = _download_mp4(video_url)
