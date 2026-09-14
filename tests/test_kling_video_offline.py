@@ -144,10 +144,7 @@ class TestKlingPost(unittest.TestCase):
         mock_post.return_value = mock_resp
 
         with self.assertRaises(RuntimeError) as ctx:
-            _kling_post(
-                "https://api-singapore.klingai.com/v1/videos/text2video",
-                "access_key",
-                "secret_key",
+            _kling_post("https://api-singapore.klingai.com/v1/videos/text2video", "tok-fake",
                 {"model_name": "kling-v3", "prompt": "test"},
             )
 
@@ -166,9 +163,7 @@ class TestKlingPost(unittest.TestCase):
         mock_post.return_value = mock_resp
 
         with self.assertRaises(RuntimeError) as ctx:
-            _kling_post(
-                "https://api-singapore.klingai.com/v1/videos/text2video",
-                "a", "b", {},
+            _kling_post("https://api-singapore.klingai.com/v1/videos/text2video", "tok-fake", {},
             )
 
         self.assertIn("401", str(ctx.exception))
@@ -198,8 +193,9 @@ class TestAwKlingVideoNodeGenerate(unittest.TestCase):
 
             result = node.generate(
                 prompt="A photorealistic walkthrough",
-                access_key="KLING_ACC_LITERAL",   # lowercase nao existe no env -> literal
-                secret_key="KLING_SEC_LITERAL",
+                api_key="",
+                access_key="ak-literal-AbC123",   # nao tem forma de env var -> literal
+                secret_key="sk-literal-XyZ789",
                 model_name="kling-v3",
                 negative_prompt="",
                 duration="5",
@@ -233,6 +229,7 @@ class TestAwKlingVideoNodeGenerate(unittest.TestCase):
         with self.assertRaises(RuntimeError) as ctx:
             node.generate(
                 prompt="test",
+                api_key="",
                 access_key="",
                 secret_key="some_secret",
                 model_name="kling-v3",
@@ -254,7 +251,8 @@ class TestAwKlingVideoNodeGenerate(unittest.TestCase):
         with self.assertRaises(RuntimeError) as ctx:
             node.generate(
                 prompt="test",
-                access_key="ACC_KEY",
+                api_key="",
+                access_key="ak-literal-AbC123",
                 secret_key="",
                 model_name="kling-v3",
                 negative_prompt="",
@@ -280,8 +278,9 @@ class TestAwKlingVideoNodeGenerate(unittest.TestCase):
             with self.assertRaises(RuntimeError) as ctx:
                 node.generate(
                     prompt="test",
-                    access_key="ACC_KEY",
-                    secret_key="SEC_KEY",
+                    api_key="",
+                    access_key="ak-literal-AbC123",
+                    secret_key="sk-literal-XyZ789",
                     model_name="kling-v3",
                     negative_prompt="",
                     duration="5",
@@ -380,3 +379,168 @@ if __name__ == "__main__":
     for suite in suites:
         result = runner.run(suite)
     sys.exit(0 if result.wasSuccessful() else 1)
+
+
+class TestCredentialFailLoud(unittest.TestCase):
+    """
+    O fallback silencioso assinava o JWT com a propria string "KLING_SECRET_KEY" e o
+    Kling devolvia 401 code=1002 "access key not found" — um erro que aponta para a
+    conta, nao para a env faltando. Aconteceu de verdade em 11/09/2026.
+    """
+
+    def test_env_name_shape_without_env_raises_naming_the_field_and_var(self):
+        with patch.dict(os.environ, {}, clear=True):
+            with self.assertRaises(RuntimeError) as ctx:
+                _mod._resolve_credential("KLING_SECRET_KEY", "secret_key")
+        msg = str(ctx.exception)
+        self.assertIn("secret_key", msg)
+        self.assertIn("KLING_SECRET_KEY", msg)
+
+    def test_env_name_shape_with_env_set_returns_env_value(self):
+        with patch.dict(os.environ, {"KLING_SECRET_KEY": "sk-real-value"}, clear=True):
+            self.assertEqual(
+                _mod._resolve_credential("KLING_SECRET_KEY", "secret_key"), "sk-real-value"
+            )
+
+    def test_literal_credential_passes_through_untouched(self):
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(
+                _mod._resolve_credential("AbC123-real-key", "access_key"), "AbC123-real-key"
+            )
+
+    def test_empty_input_raises(self):
+        with self.assertRaises(RuntimeError):
+            _mod._resolve_credential("   ", "access_key")
+
+
+class TestApiKeyBearerMode(unittest.TestCase):
+    """
+    O Kling do console entrega UMA credencial para muita gente, e a skill oficial suporta
+    isso via KLING_TOKEN (bearer pronto, sem assinar JWT). O node precisa do mesmo caminho,
+    senao quem tem uma chave so fica sem opcao — nenhum custom node de ComfyUI cobre isso.
+    """
+
+    def _kwargs(self, **over):
+        base = dict(
+            prompt="test",
+            api_key="",
+            access_key="ak-literal-AbC123",
+            secret_key="sk-literal-XyZ789",
+            model_name="kling-v3",
+            negative_prompt="",
+            duration="5",
+            mode="std",
+            aspect_ratio="16:9",
+            sound="off",
+            filename_prefix="aw_kling",
+            timeout_seconds=60,
+            seed=0,
+        )
+        base.update(over)
+        return base
+
+    def test_api_key_e_usado_direto_sem_assinar_jwt(self):
+        node = AwKlingVideoNode()
+        with patch.object(_mod, "_gen_jwt") as gen, \
+             patch.object(_mod, "_kling_post", return_value={"code": 0, "data": {"task_id": "t1"}}) as post_mock, \
+             patch.object(_mod, "_poll_until_done", return_value="http://x/v.mp4"), \
+             patch.object(_mod, "_download_mp4", return_value=b"mp4"), \
+             patch.object(_mod, "_save_mp4", return_value=("v.mp4", "")):
+            node.generate(**self._kwargs(api_key="tok-bearer-pronto"))
+
+        gen.assert_not_called()
+        # o token que foi parar no POST e o proprio api_key
+        self.assertEqual(post_mock.call_args[0][1], "tok-bearer-pronto")
+
+    def test_sem_api_key_assina_jwt_com_ak_sk(self):
+        node = AwKlingVideoNode()
+        with patch.object(_mod, "_gen_jwt", return_value="jwt-assinado") as gen, \
+             patch.object(_mod, "_kling_post", return_value={"code": 0, "data": {"task_id": "t1"}}) as post_mock, \
+             patch.object(_mod, "_poll_until_done", return_value="http://x/v.mp4"), \
+             patch.object(_mod, "_download_mp4", return_value=b"mp4"), \
+             patch.object(_mod, "_save_mp4", return_value=("v.mp4", "")):
+            node.generate(**self._kwargs())
+
+        gen.assert_called_once_with("ak-literal-AbC123", "sk-literal-XyZ789")
+        self.assertEqual(post_mock.call_args[0][1], "jwt-assinado")
+
+    def test_api_key_pode_ser_nome_de_env_var(self):
+        node = AwKlingVideoNode()
+        with patch.dict(os.environ, {"KLING_API_KEY": "tok-da-env"}, clear=False), \
+             patch.object(_mod, "_gen_jwt") as gen, \
+             patch.object(_mod, "_kling_post", return_value={"code": 0, "data": {"task_id": "t1"}}) as post_mock, \
+             patch.object(_mod, "_poll_until_done", return_value="http://x/v.mp4"), \
+             patch.object(_mod, "_download_mp4", return_value=b"mp4"), \
+             patch.object(_mod, "_save_mp4", return_value=("v.mp4", "")):
+            node.generate(**self._kwargs(api_key="KLING_API_KEY"))
+
+        gen.assert_not_called()
+        self.assertEqual(post_mock.call_args[0][1], "tok-da-env")
+
+    def test_api_key_com_env_ausente_cai_para_ak_sk_em_vez_de_estourar(self):
+        """api_key e opcional: env nao definida nao pode matar o caminho AK/SK."""
+        node = AwKlingVideoNode()
+        with patch.dict(os.environ, {}, clear=True), \
+             patch.object(_mod, "_gen_jwt", return_value="jwt-assinado"), \
+             patch.object(_mod, "_kling_post", return_value={"code": 0, "data": {"task_id": "t1"}}) as post_mock, \
+             patch.object(_mod, "_poll_until_done", return_value="http://x/v.mp4"), \
+             patch.object(_mod, "_download_mp4", return_value=b"mp4"), \
+             patch.object(_mod, "_save_mp4", return_value=("v.mp4", "")):
+            node.generate(**self._kwargs(api_key="KLING_API_KEY_INEXISTENTE"))
+
+        self.assertEqual(post_mock.call_args[0][1], "jwt-assinado")
+
+
+class TestGrafoSomenteApiKey(unittest.TestCase):
+    """
+    access_key/secret_key sao OPTIONAL no INPUT_TYPES desde que a API Key virou o
+    caminho padrao. O ComfyUI nao envia input optional ausente — entao generate()
+    precisa funcionar sem eles. Sem default na assinatura isso da TypeError antes de
+    qualquer requisicao, e nenhum teste pegava porque todos passavam o par.
+    """
+
+    def test_generate_sem_access_key_nem_secret_key(self):
+        node = AwKlingVideoNode()
+        with patch.object(_mod, "_gen_jwt") as gen, \
+             patch.object(_mod, "_kling_post",
+                          return_value={"code": 0, "data": {"task_id": "t1"}}) as post_mock, \
+             patch.object(_mod, "_poll_until_done", return_value="http://x/v.mp4"), \
+             patch.object(_mod, "_download_mp4", return_value=b"mp4"), \
+             patch.object(_mod, "_save_mp4", return_value=("v.mp4", "")):
+            result = node.generate(
+                prompt="test",
+                api_key="api-key-kling-exemplo",
+                model_name="kling-v3",
+                negative_prompt="",
+                duration="5",
+                mode="std",
+                aspect_ratio="16:9",
+                sound="off",
+                filename_prefix="aw_kling",
+                timeout_seconds=60,
+                seed=0,
+            )
+
+        gen.assert_not_called()
+        self.assertEqual(post_mock.call_args[0][1], "api-key-kling-exemplo")
+        self.assertIn("ui", result)
+        self.assertIn("video", result["ui"])
+
+    def test_sem_nenhuma_credencial_erro_e_claro(self):
+        node = AwKlingVideoNode()
+        with patch.dict(os.environ, {}, clear=True):
+            with self.assertRaises(RuntimeError) as ctx:
+                node.generate(
+                    prompt="test",
+                    api_key="",
+                    model_name="kling-v3",
+                    negative_prompt="",
+                    duration="5",
+                    mode="std",
+                    aspect_ratio="16:9",
+                    sound="off",
+                    filename_prefix="aw_kling",
+                    timeout_seconds=60,
+                    seed=0,
+                )
+        self.assertIn("api_key", str(ctx.exception))

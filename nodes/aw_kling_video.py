@@ -20,6 +20,7 @@ import hmac
 import io
 import json
 import os
+import re
 import time
 
 # requests and ComfyUI libs (folder_paths, torch, numpy, PIL) are imported
@@ -44,19 +45,45 @@ _POLL_INTERVAL_SECONDS = 10  # seconds between status-poll requests
 # ---------------------------------------------------------------------------
 
 
-def _resolve_credential(raw_value: str) -> str:
+_ENV_NAME_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
+
+
+def _resolve_credential(raw_value: str, field: str, required: bool = True) -> str:
     """
-    Resolve a credential input following the pack convention:
-    - If the value looks like an environment-variable name (all-uppercase,
-      no spaces, no special chars typical of actual key material), try
-      os.environ first; return the env value if found.
-    - Otherwise return the literal string as-is (user pasted the key).
+    Resolve a credential input following the pack convention: the input carries
+    either the NAME of an environment variable or the literal key material.
+
+    Falha ALTO quando o valor tem forma de nome de env var e a env nao existe.
+    O fallback silencioso anterior devolvia a propria string ("KLING_SECRET_KEY")
+    como se fosse o segredo, assinava o JWT com ela, e o Kling respondia
+    401 code=1002 — um erro que aponta para a conta, nao para a configuracao.
+    Meia hora de investigacao na direcao errada; ver o relato em 11/09/2026.
     """
     stripped = raw_value.strip()
-    if stripped and stripped == stripped.upper() and " " not in stripped:
+
+    if not stripped:
+        if not required:
+            return ""
+        raise RuntimeError(
+            f"AwKlingVideoNode: o input '{field}' esta vazio. Informe o NOME de uma "
+            f"variavel de ambiente (ex.: KLING_ACCESS_KEY) ou cole a credencial."
+        )
+
+    if _ENV_NAME_RE.match(stripped):
         env_val = os.environ.get(stripped, "")
-        if env_val:
-            return env_val
+        if not env_val:
+            if not required:
+                return ""
+            raise RuntimeError(
+                f"AwKlingVideoNode: o input '{field}' vale '{stripped}', que tem forma de "
+                f"nome de variavel de ambiente, mas essa variavel NAO esta definida no "
+                f"processo do ComfyUI. O node nao vai assinar o token com esse texto. "
+                f"Defina a env no container, ou ligue este input a um node de secret, "
+                f"ou cole a credencial literal. Lembre que o Kling exige o PAR "
+                f"access_key + secret_key — uma chave sozinha nao autentica."
+            )
+        return env_val
+
     return stripped
 
 
@@ -113,18 +140,17 @@ def _tensor_to_png_b64(tensor) -> str:
     return base64.b64encode(buf.getvalue()).decode("utf-8")
 
 
-def _kling_post(url: str, access_key: str, secret_key: str, body: dict) -> dict:
+def _kling_post(url: str, token: str, body: dict) -> dict:
     """
-    POST to the Kling API with a freshly-minted JWT.
+    POST to the Kling API with a ready Bearer token (JWT assinado, ou API key direta).
     Raises RuntimeError on:
       - non-200 HTTP status
       - response body where code != 0 (Kling returns errors via code even on HTTP 200)
     """
     import requests as req  # noqa: PLC0415
 
-    jwt = _gen_jwt(access_key, secret_key)
     headers = {
-        "Authorization": f"Bearer {jwt}",
+        "Authorization": f"Bearer {token}",
         "Content-Type": "application/json",
     }
     resp = req.post(url, headers=headers, json=body, timeout=60)
@@ -145,15 +171,14 @@ def _kling_post(url: str, access_key: str, secret_key: str, body: dict) -> dict:
     return data
 
 
-def _kling_get(url: str, access_key: str, secret_key: str) -> dict:
+def _kling_get(url: str, token: str) -> dict:
     """
-    GET from the Kling API with a freshly-minted JWT.
+    GET from the Kling API with a ready Bearer token.
     Raises RuntimeError on HTTP error or API-level error (code != 0).
     """
     import requests as req  # noqa: PLC0415
 
-    jwt = _gen_jwt(access_key, secret_key)
-    headers = {"Authorization": f"Bearer {jwt}"}
+    headers = {"Authorization": f"Bearer {token}"}
     resp = req.get(url, headers=headers, timeout=60)
     if resp.status_code != 200:
         snippet = resp.text[:400]
@@ -196,7 +221,7 @@ def _poll_until_done(
                 f"{timeout_seconds}) if the model needs more time."
             )
 
-        resp_data = _kling_get(poll_url, access_key, secret_key)
+        resp_data = _kling_get(poll_url, token)
         task_data = resp_data.get("data", {})
         status = task_data.get("task_status", "")
 
@@ -316,16 +341,21 @@ class AwKlingVideoNode:
                         "default": "A photorealistic architectural walkthrough",
                     },
                 ),
-                "access_key": (
+                # CAMINHO PADRAO desde o "new design standards" do Kling: o console entrega
+                # UMA API Key (prefixo api-key-kling-...) que e o proprio Bearer. Provado com
+                # chamada real em 14/09/2026: GET /v1/videos/text2video com
+                # "Authorization: Bearer <api key>" devolve 200, sem assinar JWT.
+                # O par access_key/secret_key -> JWT HS256 e o caminho LEGADO, mantido para
+                # contas antigas. A prioridade espelha a da skill oficial (KLING_TOKEN > AK/SK).
+                "api_key": (
                     "STRING",
                     {
-                        "default": "KLING_ACCESS_KEY",
-                    },
-                ),
-                "secret_key": (
-                    "STRING",
-                    {
-                        "default": "KLING_SECRET_KEY",
+                        "default": "KLING_API_KEY",
+                        "tooltip": (
+                            "API Key do console do Kling (api-key-kling-...), usada direto "
+                            "como Bearer. Aceita tambem o NOME de uma env var. Este e o "
+                            "caminho atual; access_key/secret_key so servem a contas legadas."
+                        ),
                     },
                 ),
                 # Free-form string — not a COMBO — so new model names don't
@@ -402,6 +432,21 @@ class AwKlingVideoNode:
                 ),
             },
             "optional": {
+
+                # Caminho LEGADO (contas anteriores ao "new design standards"): o node
+                # assina um JWT HS256 com o par. So e usado quando api_key esta vazio.
+                "access_key": (
+                    "STRING",
+                    {
+                        "default": "KLING_ACCESS_KEY",
+                    },
+                ),
+                "secret_key": (
+                    "STRING",
+                    {
+                        "default": "KLING_SECRET_KEY",
+                    },
+                ),
                 # If connected, the node switches to image-to-video mode.
                 # Tensor shape [H,W,3] or [1,H,W,3]; first frame is used.
                 # Converted to PNG base64 (no data-uri prefix) before sending.
@@ -419,8 +464,7 @@ class AwKlingVideoNode:
     def generate(
         self,
         prompt: str,
-        access_key: str,
-        secret_key: str,
+        api_key: str,
         model_name: str,
         negative_prompt: str,
         duration: str,
@@ -432,22 +476,41 @@ class AwKlingVideoNode:
         seed: int,  # noqa: ARG002 — intentionally unused; see INPUT_TYPES comment
         image=None,
         image_tail=None,
+        # Caminho LEGADO. Sao OPTIONAL no INPUT_TYPES, e o ComfyUI nao envia input
+        # optional ausente — sem default aqui, um grafo que so preenche api_key
+        # estoura TypeError antes de executar qualquer coisa.
+        access_key: str = "",
+        secret_key: str = "",
     ):
         # ---- resolve credentials -------------------------------------------
-        resolved_access = _resolve_credential(access_key)
-        resolved_secret = _resolve_credential(secret_key)
+        # Prioridade de credencial, igual a da skill oficial do Kling:
+        #   1) api_key  -> usado DIRETO como Bearer, sem assinar nada
+        #   2) AK + SK  -> JWT HS256 por request
+        # O Bearer do header e o par AK/SK nao sao caminhos rivais: o JWT assinado com
+        # AK/SK E o que vai no Bearer. Quem so tem uma credencial usa o caminho 1.
+        token = ""
 
-        if not resolved_access:
-            raise RuntimeError(
-                "AwKlingVideoNode: access_key resolved to an empty string. "
-                "Set KLING_ACCESS_KEY in the ComfyUI .env or paste the key directly."
-            )
-        if not resolved_secret:
-            raise RuntimeError(
-                "AwKlingVideoNode: secret_key resolved to an empty string. "
-                "Set KLING_SECRET_KEY in the ComfyUI .env or paste the key directly."
-            )
+        if (api_key or "").strip():
+            token = _resolve_credential(api_key, "api_key", required=False)
 
+        if not token:
+            # Caminho legado: so vale a pena tentar se ALGUMA das duas foi preenchida.
+            # Tentar com as duas vazias produziria "o input 'access_key' esta vazio",
+            # mensagem enganosa para quem so queria usar a API Key.
+            tem_par = bool((access_key or "").strip() or (secret_key or "").strip())
+            if tem_par:
+                token = _gen_jwt(
+                    _resolve_credential(access_key, "access_key"),
+                    _resolve_credential(secret_key, "secret_key"),
+                )
+
+        if not token:
+            raise RuntimeError(
+                "AwKlingVideoNode: nenhuma credencial utilizavel. Preencha 'api_key' com a "
+                "API Key do console do Kling (api-key-kling-...) — e o caminho atual. "
+                "Contas legadas podem usar access_key + secret_key, que o node converte "
+                "em JWT. Ambos aceitam tambem o NOME de uma variavel de ambiente."
+            )
         base = _api_base()
 
         # ---- build request body and choose endpoint -----------------------
@@ -485,7 +548,7 @@ class AwKlingVideoNode:
             }
 
         # ---- submit task ---------------------------------------------------
-        submit_resp = _kling_post(endpoint, resolved_access, resolved_secret, body)
+        submit_resp = _kling_post(endpoint, token, body)
         try:
             task_id = submit_resp["data"]["task_id"]
         except (KeyError, TypeError) as exc:
@@ -496,9 +559,7 @@ class AwKlingVideoNode:
             ) from exc
 
         # ---- poll until video is ready ------------------------------------
-        video_url = _poll_until_done(
-            route, task_id, resolved_access, resolved_secret, timeout_seconds
-        )
+        video_url = _poll_until_done(route, task_id, token, timeout_seconds)
 
         # ---- download mp4 -------------------------------------------------
         mp4_bytes = _download_mp4(video_url)

@@ -176,9 +176,23 @@ class GeminiImageInteractionsNode:
                     },
                 ),
                 "mime_type": (
-                    ["image/png", "image/jpeg"],
+                    # Formato de SAIDA (response_format.mime_type). A Interactions API
+                    # aceita SO image/jpeg — com image/png a chamada morre em HTTP 400:
+                    #   "The value 'image/png' is not supported for
+                    #    'response_format.mime_type'. Supported values: 'image/jpeg'."
+                    # (verificado 11/09/2026 no /history das replicas do comfyui-hml)
+                    # image/png fica na lista para nao quebrar grafos ja salvos na
+                    # validacao de COMBO do ComfyUI — mas o generate() recusa cedo,
+                    # com mensagem clara, em vez de deixar o 400 remoto chegar truncado.
+                    # NAO confundir com o mime_type do bloco de ENTRADA, que segue
+                    # image/png e e aceito normalmente.
+                    ["image/jpeg", "image/png"],
                     {
-                        "default": "image/png",
+                        "default": "image/jpeg",
+                        "tooltip": (
+                            "Formato de saida. A Interactions API aceita apenas "
+                            "image/jpeg; image/png devolve HTTP 400."
+                        ),
                     },
                 ),
                 # seed: the Interactions API does not document a seed parameter.
@@ -290,6 +304,18 @@ class GeminiImageInteractionsNode:
                         "data": b64,
                     }
                 )
+
+        # ---- guarda de formato de saida ------------------------------------
+        # Falhar aqui, local e explicito, em vez de deixar a API devolver 400 e o
+        # erro chegar truncado ao usuario. O default do node era image/png e fazia
+        # todo grafo novo montado na UI nascer quebrado (11/09/2026).
+        if mime_type != "image/jpeg":
+            raise RuntimeError(
+                f"GeminiImageInteractionsNode: response_format.mime_type='{mime_type}' "
+                f"nao e aceito pela Interactions API, que suporta apenas 'image/jpeg' "
+                f"(verificado em 11/09/2026). Troque o widget mime_type para image/jpeg. "
+                f"A imagem de ENTRADA continua indo como PNG e isso esta correto."
+            )
 
         # ---- build request body --------------------------------------------
         body = {

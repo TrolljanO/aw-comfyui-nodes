@@ -262,7 +262,7 @@ class TestGeminiImageInteractionsNode(unittest.TestCase):
             model="gemini-3.1-flash-image",
             aspect_ratio="16:9",
             image_size="2K",
-            mime_type="image/png",
+            mime_type="image/jpeg",
             seed=42,  # silently ignored; API does not support seed
         )
 
@@ -335,7 +335,7 @@ class TestGeminiImageInteractionsNode(unittest.TestCase):
                 model="gemini-3.1-flash-image",
                 aspect_ratio="16:9",
                 image_size="1K",
-                mime_type="image/png",
+                mime_type="image/jpeg",
                 seed=0,
             )
 
@@ -375,7 +375,7 @@ class TestGeminiImageInteractionsNode(unittest.TestCase):
             model="gemini-3.1-flash-image",
             aspect_ratio="16:9",
             image_size="2K",
-            mime_type="image/png",
+            mime_type="image/jpeg",
             seed=0,
             thinking_level="high",
         )
@@ -393,7 +393,7 @@ class TestGeminiImageInteractionsNode(unittest.TestCase):
             model="gemini-3-pro-image",
             aspect_ratio="16:9",
             image_size="2K",
-            mime_type="image/png",
+            mime_type="image/jpeg",
             seed=0,
             thinking_level="high",
         )
@@ -418,7 +418,7 @@ class TestGeminiImageInteractionsNode(unittest.TestCase):
             model="gemini-3.1-flash-image",
             aspect_ratio="16:9",
             image_size="2K",
-            mime_type="image/png",
+            mime_type="image/jpeg",
             seed=0,
             previous_interaction_id="interactions/prev456",
         )
@@ -466,3 +466,21 @@ if __name__ == "__main__":
     runner = unittest.TextTestRunner(verbosity=2)
     result = runner.run(suite)
     sys.exit(0 if result.wasSuccessful() else 1)
+
+
+class TestOutputMimeTypeGuard(unittest.TestCase):
+    """
+    A Interactions API so aceita image/jpeg em response_format.mime_type. O default do
+    node era image/png, entao todo grafo novo montado na UI nascia quebrado com HTTP
+    400 — erro que chegava truncado ao usuario. Ver vault: "Interactions API so devolve JPEG".
+    """
+
+    def test_default_do_combo_e_jpeg(self):
+        spec = _mod.GeminiImageInteractionsNode.INPUT_TYPES()["required"]["mime_type"]
+        opcoes, cfg = spec[0], spec[1]
+        self.assertEqual(cfg["default"], "image/jpeg")
+        self.assertEqual(opcoes[0], "image/jpeg")
+
+    def test_png_continua_selecionavel_para_nao_quebrar_grafo_salvo(self):
+        opcoes = _mod.GeminiImageInteractionsNode.INPUT_TYPES()["required"]["mime_type"][0]
+        self.assertIn("image/png", opcoes)
