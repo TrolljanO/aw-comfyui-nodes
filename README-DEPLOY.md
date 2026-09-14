@@ -136,6 +136,31 @@ Se o node existe: response contem `"prompt_id"`.
 
 ## Variaveis de ambiente
 
+### Kling (AwKlingVideoNode)
+
+O Kling migrou para **API Key unica** ("new design standards"). O console entrega uma
+chave com prefixo `api-key-kling-...` que **e o proprio Bearer** — nao ha JWT a assinar.
+Verificado com chamada real em 14/09/2026:
+
+```bash
+curl -s -o /dev/null -w '%{http_code}\n' \
+  -H "Authorization: Bearer <API_KEY>" \
+  "https://api-singapore.klingai.com/v1/videos/text2video?pageNum=1&pageSize=1"
+# 200
+```
+
+| variavel | uso |
+|---|---|
+| `KLING_API_KEY` | **caminho atual.** A API Key do console, usada direto como Bearer |
+| `KLING_ACCESS_KEY` + `KLING_SECRET_KEY` | caminho **legado** (contas antigas): o node assina um JWT HS256 |
+| `KLING_API_BASE` | opcional; default `https://api-singapore.klingai.com` |
+
+No grafo, ligue o secret ao input **`api_key`** — nao ao `access_key`. Os inputs
+`access_key`/`secret_key` sao `optional` e existem so para contas legadas.
+
+⚠️ A API Key so e exibida **uma vez**, na criacao. Nao ha como recupera-la depois:
+chave perdida = chave nova.
+
 | Variavel | Node | Descricao |
 |---|---|---|
 | `GEMINI_API_KEY` | GeminiImageInteractionsNode | API key do Google AI Studio |

@@ -489,3 +489,58 @@ class TestApiKeyBearerMode(unittest.TestCase):
             node.generate(**self._kwargs(api_key="KLING_API_KEY_INEXISTENTE"))
 
         self.assertEqual(post_mock.call_args[0][1], "jwt-assinado")
+
+
+class TestGrafoSomenteApiKey(unittest.TestCase):
+    """
+    access_key/secret_key sao OPTIONAL no INPUT_TYPES desde que a API Key virou o
+    caminho padrao. O ComfyUI nao envia input optional ausente — entao generate()
+    precisa funcionar sem eles. Sem default na assinatura isso da TypeError antes de
+    qualquer requisicao, e nenhum teste pegava porque todos passavam o par.
+    """
+
+    def test_generate_sem_access_key_nem_secret_key(self):
+        node = AwKlingVideoNode()
+        with patch.object(_mod, "_gen_jwt") as gen, \
+             patch.object(_mod, "_kling_post",
+                          return_value={"code": 0, "data": {"task_id": "t1"}}) as post_mock, \
+             patch.object(_mod, "_poll_until_done", return_value="http://x/v.mp4"), \
+             patch.object(_mod, "_download_mp4", return_value=b"mp4"), \
+             patch.object(_mod, "_save_mp4", return_value=("v.mp4", "")):
+            result = node.generate(
+                prompt="test",
+                api_key="api-key-kling-exemplo",
+                model_name="kling-v3",
+                negative_prompt="",
+                duration="5",
+                mode="std",
+                aspect_ratio="16:9",
+                sound="off",
+                filename_prefix="aw_kling",
+                timeout_seconds=60,
+                seed=0,
+            )
+
+        gen.assert_not_called()
+        self.assertEqual(post_mock.call_args[0][1], "api-key-kling-exemplo")
+        self.assertIn("ui", result)
+        self.assertIn("video", result["ui"])
+
+    def test_sem_nenhuma_credencial_erro_e_claro(self):
+        node = AwKlingVideoNode()
+        with patch.dict(os.environ, {}, clear=True):
+            with self.assertRaises(RuntimeError) as ctx:
+                node.generate(
+                    prompt="test",
+                    api_key="",
+                    model_name="kling-v3",
+                    negative_prompt="",
+                    duration="5",
+                    mode="std",
+                    aspect_ratio="16:9",
+                    sound="off",
+                    filename_prefix="aw_kling",
+                    timeout_seconds=60,
+                    seed=0,
+                )
+        self.assertIn("api_key", str(ctx.exception))

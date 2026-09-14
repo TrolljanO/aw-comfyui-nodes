@@ -341,29 +341,21 @@ class AwKlingVideoNode:
                         "default": "A photorealistic architectural walkthrough",
                     },
                 ),
-                # Token Bearer PRONTO. Tem prioridade sobre access_key/secret_key, espelhando
-                # a prioridade da skill oficial (KLING_TOKEN > AK/SK -> JWT). Serve para quem
-                # so tem UMA credencial: cola aqui e o node nao assina JWT nenhum.
+                # CAMINHO PADRAO desde o "new design standards" do Kling: o console entrega
+                # UMA API Key (prefixo api-key-kling-...) que e o proprio Bearer. Provado com
+                # chamada real em 14/09/2026: GET /v1/videos/text2video com
+                # "Authorization: Bearer <api key>" devolve 200, sem assinar JWT.
+                # O par access_key/secret_key -> JWT HS256 e o caminho LEGADO, mantido para
+                # contas antigas. A prioridade espelha a da skill oficial (KLING_TOKEN > AK/SK).
                 "api_key": (
                     "STRING",
                     {
                         "default": "KLING_API_KEY",
                         "tooltip": (
-                            "Token Bearer pronto (ou o NOME de uma env var que o contenha). "
-                            "Se preenchido, access_key/secret_key sao ignorados."
+                            "API Key do console do Kling (api-key-kling-...), usada direto "
+                            "como Bearer. Aceita tambem o NOME de uma env var. Este e o "
+                            "caminho atual; access_key/secret_key so servem a contas legadas."
                         ),
-                    },
-                ),
-                "access_key": (
-                    "STRING",
-                    {
-                        "default": "KLING_ACCESS_KEY",
-                    },
-                ),
-                "secret_key": (
-                    "STRING",
-                    {
-                        "default": "KLING_SECRET_KEY",
                     },
                 ),
                 # Free-form string — not a COMBO — so new model names don't
@@ -440,6 +432,21 @@ class AwKlingVideoNode:
                 ),
             },
             "optional": {
+
+                # Caminho LEGADO (contas anteriores ao "new design standards"): o node
+                # assina um JWT HS256 com o par. So e usado quando api_key esta vazio.
+                "access_key": (
+                    "STRING",
+                    {
+                        "default": "KLING_ACCESS_KEY",
+                    },
+                ),
+                "secret_key": (
+                    "STRING",
+                    {
+                        "default": "KLING_SECRET_KEY",
+                    },
+                ),
                 # If connected, the node switches to image-to-video mode.
                 # Tensor shape [H,W,3] or [1,H,W,3]; first frame is used.
                 # Converted to PNG base64 (no data-uri prefix) before sending.
@@ -458,8 +465,6 @@ class AwKlingVideoNode:
         self,
         prompt: str,
         api_key: str,
-        access_key: str,
-        secret_key: str,
         model_name: str,
         negative_prompt: str,
         duration: str,
@@ -471,6 +476,11 @@ class AwKlingVideoNode:
         seed: int,  # noqa: ARG002 — intentionally unused; see INPUT_TYPES comment
         image=None,
         image_tail=None,
+        # Caminho LEGADO. Sao OPTIONAL no INPUT_TYPES, e o ComfyUI nao envia input
+        # optional ausente — sem default aqui, um grafo que so preenche api_key
+        # estoura TypeError antes de executar qualquer coisa.
+        access_key: str = "",
+        secret_key: str = "",
     ):
         # ---- resolve credentials -------------------------------------------
         # Prioridade de credencial, igual a da skill oficial do Kling:
@@ -478,23 +488,28 @@ class AwKlingVideoNode:
         #   2) AK + SK  -> JWT HS256 por request
         # O Bearer do header e o par AK/SK nao sao caminhos rivais: o JWT assinado com
         # AK/SK E o que vai no Bearer. Quem so tem uma credencial usa o caminho 1.
-        raw_api_key = (api_key or "").strip()
         token = ""
 
-        if raw_api_key:
-            resolved = _resolve_credential(raw_api_key, "api_key", required=False)
-            if resolved:
-                token = resolved
+        if (api_key or "").strip():
+            token = _resolve_credential(api_key, "api_key", required=False)
 
         if not token:
-            resolved_access = _resolve_credential(access_key, "access_key")
-            resolved_secret = _resolve_credential(secret_key, "secret_key")
-            token = _gen_jwt(resolved_access, resolved_secret)
+            # Caminho legado: so vale a pena tentar se ALGUMA das duas foi preenchida.
+            # Tentar com as duas vazias produziria "o input 'access_key' esta vazio",
+            # mensagem enganosa para quem so queria usar a API Key.
+            tem_par = bool((access_key or "").strip() or (secret_key or "").strip())
+            if tem_par:
+                token = _gen_jwt(
+                    _resolve_credential(access_key, "access_key"),
+                    _resolve_credential(secret_key, "secret_key"),
+                )
 
         if not token:
             raise RuntimeError(
-                "AwKlingVideoNode: nenhuma credencial utilizavel. Preencha api_key com um "
-                "token Bearer pronto, OU access_key + secret_key para o node assinar o JWT."
+                "AwKlingVideoNode: nenhuma credencial utilizavel. Preencha 'api_key' com a "
+                "API Key do console do Kling (api-key-kling-...) — e o caminho atual. "
+                "Contas legadas podem usar access_key + secret_key, que o node converte "
+                "em JWT. Ambos aceitam tambem o NOME de uma variavel de ambiente."
             )
         base = _api_base()
 
